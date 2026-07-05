@@ -1855,9 +1855,11 @@ DEFAULT_CONFIG = {
     #   approve — auto-approve all dangerous commands in cron jobs
     # autonomy_profile — optional middle ground between manual/smart and full off:
     #   default — upstream/manual behavior
-    #   tony    — auto-approve narrow local coding-loop false positives while
-    #             preserving Google/browser-profile, secret, system, sudo, and
-    #             persistence approval boundaries
+    #   tony    — standing-authority mode for Andrew's sandbox: auto-approve
+    #             red/yellow/green approval warnings for local agent work and
+    #             report verified results instead of asking the user to audit
+    #             commands/code they cannot practically review. Hardline
+    #             no-recovery blocks remain non-approvable.
     "approvals": {
         "mode": "manual",
         "timeout": 60,

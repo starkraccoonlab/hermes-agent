@@ -76,7 +76,7 @@ class TestTonyAutonomyProfile:
         assert result["autonomy_profile"] == "tony"
         assert result["autonomy_approved"] is True
 
-    def test_tony_profile_keeps_google_browser_profile_on_approval_path(self, monkeypatch):
+    def test_tony_profile_auto_approves_google_browser_profile_warning(self, monkeypatch):
         monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
         monkeypatch.setenv("HERMES_SESSION_KEY", "tony-google-protected")
         monkeypatch.delenv("HERMES_AUTONOMY_PROFILE", raising=False)
@@ -88,11 +88,12 @@ class TestTonyAutonomyProfile:
                 "local",
             )
 
-        assert result["approved"] is False
-        assert result.get("approval_pending") is True
-        assert "approval" in result["message"].lower()
+        assert result["approved"] is True
+        assert result["autonomy_profile"] == "tony"
+        assert result["autonomy_approved"] is True
+        assert result["protected_reason"] == "browser profile / signed-in account data"
 
-    def test_tony_profile_protected_boundary_overrides_broad_allowlist(self, monkeypatch):
+    def test_tony_profile_auto_approves_protected_boundary_even_with_broad_allowlist(self, monkeypatch):
         monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
         monkeypatch.setenv("HERMES_SESSION_KEY", "tony-google-allowlist-protected")
         monkeypatch.delenv("HERMES_AUTONOMY_PROFILE", raising=False)
@@ -108,8 +109,10 @@ class TestTonyAutonomyProfile:
         finally:
             approval_module._permanent_approved.discard("shell command via -c/-lc flag")
 
-        assert result["approved"] is False
-        assert result.get("approval_pending") is True
+        assert result["approved"] is True
+        assert result["autonomy_profile"] == "tony"
+        assert result["autonomy_approved"] is True
+        assert result["protected_reason"] == "browser profile / signed-in account data"
 
     def test_tony_profile_auto_approves_execute_code_loop_script(self, monkeypatch):
         monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
@@ -125,7 +128,7 @@ class TestTonyAutonomyProfile:
         assert result["autonomy_profile"] == "tony"
         assert result["autonomy_approved"] is True
 
-    def test_tony_profile_does_not_auto_approve_execute_code_touching_google(self, monkeypatch):
+    def test_tony_profile_auto_approves_execute_code_touching_google(self, monkeypatch):
         monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
         monkeypatch.setenv("HERMES_SESSION_KEY", "tony-google-code-protected")
         monkeypatch.delenv("HERMES_AUTONOMY_PROFILE", raising=False)
@@ -136,8 +139,35 @@ class TestTonyAutonomyProfile:
                 "local",
             )
 
-        assert result["approved"] is False
-        assert result.get("approval_pending") is True
+        assert result["approved"] is True
+        assert result["autonomy_profile"] == "tony"
+        assert result["autonomy_approved"] is True
+        assert result["protected_reason"] == "browser profile / signed-in account data"
+
+    def test_tony_profile_auto_approves_tirith_warning(self, monkeypatch):
+        monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+        monkeypatch.setenv("HERMES_SESSION_KEY", "tony-tirith-auto")
+        monkeypatch.delenv("HERMES_AUTONOMY_PROFILE", raising=False)
+        tirith_warn = SimpleNamespace(
+            check_command_security=lambda command: {
+                "action": "warn",
+                "findings": [{
+                    "rule_id": "test-yellow",
+                    "severity": "medium",
+                    "title": "Yellow warning",
+                    "description": "test warning",
+                }],
+                "summary": "test warning",
+            }
+        )
+
+        with mock_patch("hermes_cli.config.load_config", return_value=self._tony_config()), \
+             mock_patch.dict(sys.modules, {"tools.tirith_security": tirith_warn}):
+            result = approval_module.check_all_command_guards("python -m pytest -q", "local")
+
+        assert result["approved"] is True
+        assert result["autonomy_profile"] == "tony"
+        assert result["autonomy_approved"] is True
 
 
 class TestDetectDangerousRm:

@@ -991,39 +991,35 @@ def _tony_protected_reason(command: str) -> str | None:
 
 
 def _tony_autonomy_decision(command: str, warnings: list[tuple[str, str, bool]]) -> dict | None:
-    """Return an approval dict when Tony autonomy can safely decide.
+    """Return Tony's standing-authority approval decision.
 
-    The Tony profile is deliberately asymmetric:
-    - it only auto-approves known noisy coding-loop false positives;
-    - it never overrides hardline/sudo guards, which run before this helper;
-    - it refuses to auto-approve commands touching Google/browser profiles,
-      secrets, Hermes security config, sudo/system/persistence, remote script
-      execution, or destructive git operations.
+    Andrew's Tony profile treats approval prompts as the wrong interface for
+    local agent work: asking the user to review red/yellow/green command
+    details is usually fake safety because the user cannot practically audit
+    every shell fragment. In this profile, non-hardline warnings are logged and
+    auto-approved so the agent can execute, test, and report instead of asking
+    for rubber-stamp permission.
+
+    Hardline no-recovery commands and the sudo-stdin password-guessing guard
+    still run before this helper and remain non-approvable. Secret redaction is
+    also independent of approvals and remains active.
     """
     if _get_autonomy_profile() != "tony":
         return None
+    descriptions = {desc for _, desc, _ in warnings}
     protected_reason = _tony_protected_reason(command)
     if protected_reason:
-        logger.info(
-            "Tony autonomy: requiring approval for protected boundary (%s): %s",
-            protected_reason,
-            command[:200],
-        )
-        return None
-    if not warnings:
-        return {"approved": True, "message": None, "autonomy_profile": "tony"}
-    if any(is_tirith for _, _, is_tirith in warnings):
-        return None
-    descriptions = {desc for _, desc, _ in warnings}
-    if descriptions.issubset(_TONY_GREEN_DESCRIPTIONS):
-        return {
-            "approved": True,
-            "message": None,
-            "autonomy_profile": "tony",
-            "autonomy_approved": True,
-            "description": "; ".join(sorted(descriptions)),
-        }
-    return None
+        descriptions.add(f"protected boundary: {protected_reason}")
+    description = "; ".join(sorted(descriptions)) if descriptions else "no warnings"
+    logger.info("Tony autonomy: auto-approved command: %s (%s)", command[:200], description)
+    return {
+        "approved": True,
+        "message": None,
+        "autonomy_profile": "tony",
+        "autonomy_approved": True,
+        "description": description,
+        "protected_reason": protected_reason,
+    }
 
 
 def _smart_approve(command: str, description: str) -> str:
@@ -1659,19 +1655,15 @@ def check_execute_code_guard(code: str, env_type: str) -> dict:
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
 
     # Tony autonomy profile: execute_code is a normal loop-coding primitive.
-    # Permit it when the script does not mention protected private/system/
-    # credential boundaries. Terminal calls made inside the script still pass
-    # through this module's per-command guards.
+    # Andrew has granted standing authority for local agent work, so do not
+    # ask for per-script red/yellow/green review. Terminal calls made inside
+    # the script still pass through this module's hardline command floor.
     if _get_autonomy_profile() == "tony":
         protected_reason = _tony_protected_reason(code)
-        if protected_reason is None:
-            return {"approved": True, "message": None,
-                    "autonomy_profile": "tony", "autonomy_approved": True,
-                    "description": description}
-        logger.info(
-            "Tony autonomy: requiring execute_code approval for protected boundary (%s)",
-            protected_reason,
-        )
+        return {"approved": True, "message": None,
+                "autonomy_profile": "tony", "autonomy_approved": True,
+                "description": description,
+                "protected_reason": protected_reason}
 
     # Cron: no user is present to approve arbitrary code.
     if env_var_enabled("HERMES_CRON_SESSION"):
