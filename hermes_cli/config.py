@@ -1853,10 +1853,16 @@ DEFAULT_CONFIG = {
     # cron_mode — what to do when a cron job hits a dangerous command:
     #   deny    — block the command and let the agent find another way (default, safe)
     #   approve — auto-approve all dangerous commands in cron jobs
+    # autonomy_profile — optional middle ground between manual/smart and full off:
+    #   default — upstream/manual behavior
+    #   tony    — auto-approve narrow local coding-loop false positives while
+    #             preserving Google/browser-profile, secret, system, sudo, and
+    #             persistence approval boundaries
     "approvals": {
         "mode": "manual",
         "timeout": 60,
         "cron_mode": "deny",
+        "autonomy_profile": "default",
         # When true, /reload-mcp asks the user to confirm before rebuilding
         # the MCP tool set for the active session.  Reloading invalidates
         # the provider prompt cache (tool schemas are baked into the system

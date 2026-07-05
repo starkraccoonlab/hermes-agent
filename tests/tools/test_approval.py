@@ -2,6 +2,7 @@
 
 import ast
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -43,6 +44,100 @@ class TestSmartApproval:
         assert mock_call.call_args.kwargs["task"] == "approval"
         assert mock_call.call_args.kwargs["temperature"] == 0
         assert mock_call.call_args.kwargs["max_tokens"] == 16
+
+
+class TestTonyAutonomyProfile:
+    def _tony_config(self):
+        return {"approvals": {"mode": "manual", "autonomy_profile": "tony"}}
+
+    def _no_tirith(self):
+        return SimpleNamespace(
+            check_command_security=lambda command: {
+                "action": "allow",
+                "findings": [],
+                "summary": "",
+            }
+        )
+
+    def test_tony_profile_auto_approves_coding_loop_shell_false_positive(self, monkeypatch):
+        approval_module._permanent_approved.discard("shell command via -c/-lc flag")
+        monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+        monkeypatch.setenv("HERMES_SESSION_KEY", "tony-auto-shell")
+        monkeypatch.delenv("HERMES_AUTONOMY_PROFILE", raising=False)
+
+        with mock_patch("hermes_cli.config.load_config", return_value=self._tony_config()), \
+             mock_patch.dict(sys.modules, {"tools.tirith_security": self._no_tirith()}):
+            result = approval_module.check_all_command_guards(
+                "bash -lc 'python -m pytest tests/tools/test_approval.py -q'",
+                "local",
+            )
+
+        assert result["approved"] is True
+        assert result["autonomy_profile"] == "tony"
+        assert result["autonomy_approved"] is True
+
+    def test_tony_profile_keeps_google_browser_profile_on_approval_path(self, monkeypatch):
+        monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+        monkeypatch.setenv("HERMES_SESSION_KEY", "tony-google-protected")
+        monkeypatch.delenv("HERMES_AUTONOMY_PROFILE", raising=False)
+
+        with mock_patch("hermes_cli.config.load_config", return_value=self._tony_config()), \
+             mock_patch.dict(sys.modules, {"tools.tirith_security": self._no_tirith()}):
+            result = approval_module.check_all_command_guards(
+                "bash -lc 'sqlite3 ~/.config/google-chrome/Default/Cookies .tables'",
+                "local",
+            )
+
+        assert result["approved"] is False
+        assert result.get("approval_pending") is True
+        assert "approval" in result["message"].lower()
+
+    def test_tony_profile_protected_boundary_overrides_broad_allowlist(self, monkeypatch):
+        monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+        monkeypatch.setenv("HERMES_SESSION_KEY", "tony-google-allowlist-protected")
+        monkeypatch.delenv("HERMES_AUTONOMY_PROFILE", raising=False)
+        approval_module.load_permanent({"shell command via -c/-lc flag"})
+
+        try:
+            with mock_patch("hermes_cli.config.load_config", return_value=self._tony_config()), \
+                 mock_patch.dict(sys.modules, {"tools.tirith_security": self._no_tirith()}):
+                result = approval_module.check_all_command_guards(
+                    "bash -lc 'sqlite3 ~/.config/google-chrome/Default/Cookies .tables'",
+                    "local",
+                )
+        finally:
+            approval_module._permanent_approved.discard("shell command via -c/-lc flag")
+
+        assert result["approved"] is False
+        assert result.get("approval_pending") is True
+
+    def test_tony_profile_auto_approves_execute_code_loop_script(self, monkeypatch):
+        monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+        monkeypatch.delenv("HERMES_AUTONOMY_PROFILE", raising=False)
+
+        with mock_patch("hermes_cli.config.load_config", return_value=self._tony_config()):
+            result = approval_module.check_execute_code_guard(
+                "from hermes_tools import terminal\nprint('loop coding ok')",
+                "local",
+            )
+
+        assert result["approved"] is True
+        assert result["autonomy_profile"] == "tony"
+        assert result["autonomy_approved"] is True
+
+    def test_tony_profile_does_not_auto_approve_execute_code_touching_google(self, monkeypatch):
+        monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+        monkeypatch.setenv("HERMES_SESSION_KEY", "tony-google-code-protected")
+        monkeypatch.delenv("HERMES_AUTONOMY_PROFILE", raising=False)
+
+        with mock_patch("hermes_cli.config.load_config", return_value=self._tony_config()):
+            result = approval_module.check_execute_code_guard(
+                "from pathlib import Path\nprint(Path('~/.config/google-chrome/Default/Cookies'))",
+                "local",
+            )
+
+        assert result["approved"] is False
+        assert result.get("approval_pending") is True
 
 
 class TestDetectDangerousRm:

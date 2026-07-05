@@ -927,6 +927,105 @@ def _get_cron_approval_mode() -> str:
         return "deny"
 
 
+def _get_autonomy_profile() -> str:
+    """Return the configured autonomy profile for local approval policy.
+
+    ``approvals.mode=off`` and YOLO are all-or-nothing bypasses. Autonomy
+    profiles are intentionally narrower: they can auto-approve well-scoped
+    green-zone actions while leaving hardline blocks, sudo/password guards,
+    private-account paths, secrets, and system/persistence changes protected.
+    """
+    env_value = os.getenv("HERMES_AUTONOMY_PROFILE", "").strip().lower()
+    if env_value:
+        return env_value
+    try:
+        profile = cfg_get(_get_approval_config(), "autonomy_profile", default="default")
+        return str(profile or "default").strip().lower()
+    except Exception:
+        return "default"
+
+
+_TONY_GREEN_DESCRIPTIONS = frozenset({
+    "shell command via -c/-lc flag",
+    "script execution via -e/-c flag",
+    "script execution via heredoc",
+})
+
+
+_TONY_PROTECTED_COMMAND_PATTERNS = [
+    # User-private/browser-account surfaces. Andrew called out Google as the
+    # main sensitive thing in this sandbox, so keep Chrome/Chromium profiles
+    # behind the normal approval path even when Tony autonomy is enabled.
+    (r'\.config/(?:google-chrome|chromium|BraveSoftware|microsoft-edge)(?:/|\b)',
+     "browser profile / signed-in account data"),
+    (r'\bgoogle(?:\.com|\b)|\bgmail(?:\.com|\b)|\bdrive\.google\.com\b|\baccounts\.google\.com\b',
+     "Google account surface"),
+    (r'\bcookie(?:s)?\b|\bbrowser profile\b|\blogin\b|\bsession token\b',
+     "browser/session credential surface"),
+    # Secrets and durable security policy.
+    (r'(?:^|[\s"\'])\.?env(?:\.[^\s"\']*)?(?:[\s"\']|$)', "environment/secret file"),
+    (r'\.ssh(?:/|\b)|\b(?:id_rsa|id_ed25519|known_hosts|authorized_keys)\b', "SSH credential material"),
+    (r'\.hermes/(?:\.env|config\.ya?ml)\b', "Hermes env/config security policy"),
+    (r'\b(?:api[_-]?key|password|passwd|secret|token|credential)s?\b', "credential material"),
+    # System / persistence / visibility boundaries.
+    (r'\bsudo\b|\bsu\b|\bdoas\b', "privilege escalation"),
+    (r'\bsystemctl\b|\bcrontab\b|\.config/systemd/user|/etc/|/boot/|/dev/', "system or persistence change"),
+    (r'\b(chmod|chown)\b.*\b(?:777|666|root)\b', "broad permissions or root ownership"),
+    (r'\b(?:curl|wget)\b.*\|\s*(?:ba)?sh\b', "remote script execution"),
+    (r'\bgit\s+(?:reset\s+--hard|clean\s+-[^\s]*f|push\b.*(?:--force|-f\b))', "destructive git operation"),
+]
+
+
+_TONY_PROTECTED_COMMAND_PATTERNS_COMPILED = [
+    (re.compile(pattern, _RE_FLAGS), description)
+    for pattern, description in _TONY_PROTECTED_COMMAND_PATTERNS
+]
+
+
+def _tony_protected_reason(command: str) -> str | None:
+    normalized = _normalize_command_for_detection(command)
+    for pattern_re, description in _TONY_PROTECTED_COMMAND_PATTERNS_COMPILED:
+        if pattern_re.search(normalized):
+            return description
+    return None
+
+
+def _tony_autonomy_decision(command: str, warnings: list[tuple[str, str, bool]]) -> dict | None:
+    """Return an approval dict when Tony autonomy can safely decide.
+
+    The Tony profile is deliberately asymmetric:
+    - it only auto-approves known noisy coding-loop false positives;
+    - it never overrides hardline/sudo guards, which run before this helper;
+    - it refuses to auto-approve commands touching Google/browser profiles,
+      secrets, Hermes security config, sudo/system/persistence, remote script
+      execution, or destructive git operations.
+    """
+    if _get_autonomy_profile() != "tony":
+        return None
+    protected_reason = _tony_protected_reason(command)
+    if protected_reason:
+        logger.info(
+            "Tony autonomy: requiring approval for protected boundary (%s): %s",
+            protected_reason,
+            command[:200],
+        )
+        return None
+    if not warnings:
+        return {"approved": True, "message": None, "autonomy_profile": "tony"}
+    if any(is_tirith for _, _, is_tirith in warnings):
+        return None
+    descriptions = {desc for _, desc, _ in warnings}
+    if descriptions.issubset(_TONY_GREEN_DESCRIPTIONS):
+        return {
+            "approved": True,
+            "message": None,
+            "autonomy_profile": "tony",
+            "autonomy_approved": True,
+            "description": "; ".join(sorted(descriptions)),
+        }
+    return None
+
+
 def _smart_approve(command: str, description: str) -> str:
     """Use the auxiliary LLM to assess risk and decide approval.
 
@@ -1308,12 +1407,29 @@ def check_all_command_guards(command: str, env_type: str,
             warnings.append((tirith_key, tirith_desc, True))
 
     if is_dangerous:
-        if not is_approved(session_key, pattern_key):
+        # Tony protected boundaries (Google/browser profiles, secrets, system,
+        # sudo/persistence) must stay visible even if the user has a broad
+        # permanent allowlist for a noisy pattern like "bash -lc".  Otherwise a
+        # previously-approved coding-loop shell wrapper could accidentally cover
+        # private account data or security-policy edits.
+        if _get_autonomy_profile() == "tony" and _tony_protected_reason(command):
+            warnings.append((pattern_key, description, False))
+        elif not is_approved(session_key, pattern_key):
             warnings.append((pattern_key, description, False))
 
     # Nothing to warn about
     if not warnings:
         return {"approved": True, "message": None}
+
+    # Tony autonomy profile: auto-approve narrow coding-loop false positives
+    # while keeping protected private/system/security boundaries on the normal
+    # approval path.
+    autonomy_decision = _tony_autonomy_decision(command, warnings)
+    if autonomy_decision is not None:
+        for key, _, _ in warnings:
+            approve_session(session_key, key)
+        logger.debug("Tony autonomy: auto-approved '%s'", command[:80])
+        return autonomy_decision
 
     # --- Phase 2.5: Smart approval (auxiliary LLM risk assessment) ---
     # When approvals.mode=smart, ask the aux LLM before prompting the user.
@@ -1541,6 +1657,21 @@ def check_execute_code_guard(code: str, env_type: str) -> dict:
 
     is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
+
+    # Tony autonomy profile: execute_code is a normal loop-coding primitive.
+    # Permit it when the script does not mention protected private/system/
+    # credential boundaries. Terminal calls made inside the script still pass
+    # through this module's per-command guards.
+    if _get_autonomy_profile() == "tony":
+        protected_reason = _tony_protected_reason(code)
+        if protected_reason is None:
+            return {"approved": True, "message": None,
+                    "autonomy_profile": "tony", "autonomy_approved": True,
+                    "description": description}
+        logger.info(
+            "Tony autonomy: requiring execute_code approval for protected boundary (%s)",
+            protected_reason,
+        )
 
     # Cron: no user is present to approve arbitrary code.
     if env_var_enabled("HERMES_CRON_SESSION"):
